@@ -481,9 +481,8 @@ func (o *Orchestrator) applyResults(batch *Batch, resp InferenceResponse) {
 		NERModelID:       resp.ModelVersions.NERModel,
 		SummaryModelID:   resp.ModelVersions.SummaryModel,
 	}
+	batch.PromptVersion = resp.ModelVersions.PromptVersion
 
-	// NOTE: PromptVersion is logged here. If you later extend Batch or your
-	// persistence payload, persist it into ANALYSIS_RUN.prompt_version.
 	o.logger.Info(
 		"applied batch results",
 		"batch_id", batch.ID,

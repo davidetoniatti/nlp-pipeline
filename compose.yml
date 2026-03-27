@@ -1,4 +1,22 @@
 services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: nlp_pipeline
+      POSTGRES_USER: nlp_user
+      POSTGRES_PASSWORD: nlp_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nlp_user -d nlp_pipeline"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
   ai_service:
     build: ./nlp_service
     ports:
@@ -25,12 +43,18 @@ services:
     build: ./backend
     environment:
       INFERENCE_URL: http://ai_service:8080/analyze
+      DATABASE_URL: postgres://nlp_user:nlp_password@postgres:5432/nlp_pipeline?sslmode=disable
+      FAIL_DOC_IDS: ${FAIL_DOC_IDS:-}
+      FAIL_TEXT_CONTAINS: ${FAIL_TEXT_CONTAINS:-}
     volumes:
       - ./test_data.json:/app/test_data.json:ro
     depends_on:
       ai_service:
         condition: service_healthy
+      postgres:
+        condition: service_healthy
     restart: on-failure
 
 volumes:
   hf_cache:
+  pg_data:

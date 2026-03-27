@@ -86,6 +86,31 @@ func main() {
 		cfg.InferenceURL = envURL
 	}
 
+	databaseURL := os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
+		logger.Error("DATABASE_URL is required")
+		os.Exit(1)
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	store, err := NewStore(ctx, databaseURL, logger)
+	if err != nil {
+		logger.Error("failed to initialize store", "err", err)
+		os.Exit(1)
+	}
+	defer store.Close()
+
+	failureCfg := LoadFailureInjectionConfig()
+	if failureCfg.Enabled {
+		logger.Warn(
+			"failure injection enabled",
+			"fail_doc_ids_count", len(failureCfg.DocIDs),
+			"fail_text_contains", failureCfg.TextContains,
+		)
+	}
+
 	dataFile := resolveMockDataPath()
 
 	logger.Info(
@@ -110,9 +135,6 @@ func main() {
 	resultsCh := make(chan ProcessedBatch, 100)
 	orch := NewOrchestrator(cfg, queue, aiClient, resultsCh, logger)
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
 	var persistWG sync.WaitGroup
 	persistWG.Add(1)
 
@@ -124,11 +146,21 @@ func main() {
 		for item := range resultsCh {
 			batch := item.Batch
 
+			injected := applyFailureInjection(batch, failureCfg)
+			if injected > 0 {
+				logger.Warn(
+					"failure injection applied",
+					"batch_id", batch.ID,
+					"injected_docs", injected,
+				)
+			}
+
 			fmt.Printf("\n=== BATCH ANALYSIS: %s ===\n", batch.ID)
-			fmt.Printf("Models: sentiment=%s | ner=%s | summary=%s\n",
+			fmt.Printf("Models: sentiment=%s | ner=%s | summary=%s | prompt=%s\n",
 				batch.ModelVersions.SentimentModelID,
 				batch.ModelVersions.NERModelID,
 				batch.ModelVersions.SummaryModelID,
+				batch.PromptVersion,
 			)
 
 			for i := 0; i < batch.Size; i++ {
@@ -163,25 +195,67 @@ func main() {
 
 			logger.Info("persisting batch", "batch_id", batch.ID, "size", batch.Size)
 
-			// Demo mode: assume persistence succeeds.
-			persistOK := true
-
-			if persistOK {
-				if err := item.Ack(); err != nil {
-					logger.Error("batch ack failed", "batch_id", batch.ID, "err", err)
-				} else {
-					logger.Info(
-						"batch persisted and acked",
-						"batch_id", batch.ID,
-						"total_processed", processedDocs,
-					)
-				}
-			} else {
-				if err := item.Nack(); err != nil {
-					logger.Error("batch nack failed", "batch_id", batch.ID, "err", err)
+			if err := store.PersistBatch(ctx, batch); err != nil {
+				logger.Error("batch persistence failed", "batch_id", batch.ID, "err", err)
+				if nackErr := item.Nack(); nackErr != nil {
+					logger.Error("batch nack failed", "batch_id", batch.ID, "err", nackErr)
 				} else {
 					logger.Warn("batch not persisted, sent for retry", "batch_id", batch.ID)
 				}
+				continue
+			}
+
+			stats, err := store.VerifyBatchPersistence(ctx, batch)
+			if err != nil {
+				logger.Error("batch verification failed", "batch_id", batch.ID, "err", err)
+				if nackErr := item.Nack(); nackErr != nil {
+					logger.Error("batch nack failed after verification error", "batch_id", batch.ID, "err", nackErr)
+				}
+				continue
+			}
+
+			expectedDone := countBatchStatus(batch, StatusDone)
+			expectedFailed := countBatchStatus(batch, StatusFailed)
+
+			if stats.RunsTotal != batch.Size ||
+				stats.RunsDone != expectedDone ||
+				stats.RunsFailed != expectedFailed ||
+				stats.ResultsTotal != expectedDone {
+				logger.Error(
+					"batch verification mismatch",
+					"batch_id", batch.ID,
+					"expected_runs_total", batch.Size,
+					"actual_runs_total", stats.RunsTotal,
+					"expected_done", expectedDone,
+					"actual_done", stats.RunsDone,
+					"expected_failed", expectedFailed,
+					"actual_failed", stats.RunsFailed,
+					"expected_results", expectedDone,
+					"actual_results", stats.ResultsTotal,
+				)
+				if nackErr := item.Nack(); nackErr != nil {
+					logger.Error("batch nack failed after verification mismatch", "batch_id", batch.ID, "err", nackErr)
+				}
+				continue
+			}
+
+			logger.Info(
+				"batch persistence verified",
+				"batch_id", batch.ID,
+				"runs_total", stats.RunsTotal,
+				"runs_done", stats.RunsDone,
+				"runs_failed", stats.RunsFailed,
+				"results_total", stats.ResultsTotal,
+			)
+
+			if err := item.Ack(); err != nil {
+				logger.Error("batch ack failed", "batch_id", batch.ID, "err", err)
+			} else {
+				logger.Info(
+					"batch persisted and acked",
+					"batch_id", batch.ID,
+					"total_processed", processedDocs,
+				)
 			}
 		}
 	}()

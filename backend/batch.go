@@ -45,6 +45,7 @@ type Batch struct {
 	CreatedAt time.Time
 	UpdatedAt time.Time // last modification time; useful for retry debugging
 	Size      int       // number of documents in the batch
+	PromptVersion string
 
 	// Parallel fields: IDs[i], Texts[i], SourceIDs[i] refer to the
 	// same document. Index access is O(1) and cache-friendly.
@@ -299,4 +300,12 @@ func elapsedMillisSince(startUnixNano int64) int32 {
 		return int32(^uint32(0) >> 1)
 	}
 	return int32(elapsed)
+}
+
+func (b *Batch) ForceFail(i int, err error) {
+	b.SentimentScores[i] = 0
+	b.SentimentLabels[i] = ""
+	b.Entities[i] = nil
+	b.Summaries[i] = ""
+	b.SetError(i, err)
 }

@@ -3,10 +3,8 @@ FROM golang:1.25-alpine3.23 AS builder
 
 WORKDIR /app
 
-COPY go.mod ./
-# for future dependencies
-# COPY go.sum ./
-# RUN go mod download
+COPY go.mod go.sum ./
+RUN go mod download
 
 COPY . .
 
