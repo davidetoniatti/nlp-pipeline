@@ -1,4 +1,4 @@
-package main
+package pipeline
 
 import (
 	"sync"
@@ -33,6 +33,8 @@ type Batch struct {
 	UpdatedAt     time.Time
 	Size          int
 	PromptVersion string
+	PromptHash    string
+	ServiceGitSHA string
 
 	/* Parallel arrays. Same index, same document. */
 	IDs            []string
@@ -76,9 +78,18 @@ BatchModelVersions records which models produced this batch.
 This is small metadata, but it is important for traceability.
 */
 type BatchModelVersions struct {
-	SentimentModelID string
-	NERModelID       string
-	SummaryModelID   string
+	Sentiment ModelMetadataDTO
+	NER       ModelMetadataDTO
+	Summary   ModelMetadataDTO
+}
+
+/* ModelMetadataDTO is the internal representation of model metadata. */
+type ModelMetadataDTO struct {
+	Name      string
+	Version   string
+	Revision  string
+	Tokenizer string
+	Provider  string
 }
 
 /*
@@ -307,4 +318,21 @@ func (b *Batch) ForceFail(i int, err error) {
 	b.Entities[i] = nil
 	b.Summaries[i] = ""
 	b.SetError(i, err)
+}
+
+/*
+CountStatus returns the number of documents in the batch that have the given status.
+This is useful for verification and reporting.
+*/
+func (b *Batch) CountStatus(wanted DocumentStatus) int {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	count := 0
+	for _, s := range b.Statuses {
+		if s == wanted {
+			count++
+		}
+	}
+	return count
 }

@@ -1,4 +1,4 @@
-package main
+package pipeline
 
 import (
 	"context"
@@ -75,17 +75,17 @@ func (s *Store) PersistBatch(ctx context.Context, batch *Batch) error {
 		Resolve logical model names to real MODEL_VERSION rows first.
 		Every analysis_run needs stable foreign keys.
 	*/
-	sentimentModelID, err := s.upsertModelVersion(ctx, tx, batch.ModelVersions.SentimentModelID, "sentiment")
+	sentimentModelID, err := s.upsertModelVersion(ctx, tx, batch.ModelVersions.Sentiment, "sentiment")
 	if err != nil {
 		return fmt.Errorf("upsert sentiment model: %w", err)
 	}
 
-	nerModelID, err := s.upsertModelVersion(ctx, tx, batch.ModelVersions.NERModelID, "ner")
+	nerModelID, err := s.upsertModelVersion(ctx, tx, batch.ModelVersions.NER, "ner")
 	if err != nil {
 		return fmt.Errorf("upsert ner model: %w", err)
 	}
 
-	summaryModelID, err := s.upsertModelVersion(ctx, tx, batch.ModelVersions.SummaryModelID, "summary")
+	summaryModelID, err := s.upsertModelVersion(ctx, tx, batch.ModelVersions.Summary, "summary")
 	if err != nil {
 		return fmt.Errorf("upsert summary model: %w", err)
 	}
@@ -223,7 +223,7 @@ func (s *Store) upsertDocument(
 		batch.Texts[i],
 		hashValue,
 		languageValue,
-		statusString(batch.Statuses[i]),
+		StatusString(batch.Statuses[i]),
 		batch.CreatedAt,
 	)
 
@@ -232,36 +232,53 @@ func (s *Store) upsertDocument(
 
 /*
 upsertModelVersion ensures a model row exists and returns its id.
-The NLP service gives logical model names. The store turns them
-into real foreign keys.
 */
-func (s *Store) upsertModelVersion(ctx context.Context, tx pgxTx, modelName, taskType string) (uuid.UUID, error) {
-	modelName = strings.TrimSpace(modelName)
-	if modelName == "" {
-		modelName = "unknown"
+func (s *Store) upsertModelVersion(ctx context.Context, tx pgxTx, m ModelMetadataDTO, taskType string) (uuid.UUID, error) {
+	name := strings.TrimSpace(m.Name)
+	if name == "" {
+		name = "unknown"
 	}
 
-	provider := providerForTask(taskType)
+	version := strings.TrimSpace(m.Version)
+	if version == "" {
+		version = "unknown"
+	}
+
+	var revision any
+	if strings.TrimSpace(m.Revision) != "" {
+		revision = m.Revision
+	}
+
+	var tokenizer any
+	if strings.TrimSpace(m.Tokenizer) != "" {
+		tokenizer = m.Tokenizer
+	}
 
 	var id uuid.UUID
 	err := tx.QueryRow(ctx, `
 		INSERT INTO model_version (
 			model_name,
 			version,
+			revision,
+			tokenizer_name,
 			task_type,
 			provider,
 			artifact_uri
 		)
-		VALUES ($1, $2, $3, $4, $5)
-		ON CONFLICT (model_name, version, task_type, provider) DO UPDATE
-		SET artifact_uri = EXCLUDED.artifact_uri
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		ON CONFLICT (model_name, version, revision, task_type, provider) DO UPDATE
+		SET 
+			tokenizer_name = EXCLUDED.tokenizer_name,
+			artifact_uri = EXCLUDED.artifact_uri
 		RETURNING id
 	`,
-		modelName,
-		"unknown",
+		name,
+		version,
+		revision,
+		tokenizer,
 		taskType,
-		provider,
-		modelName,
+		m.Provider,
+		name,
 	).Scan(&id)
 
 	if err != nil {
@@ -292,6 +309,16 @@ func (s *Store) upsertAnalysisRun(
 		promptVersion = batch.PromptVersion
 	}
 
+	var promptHash any
+	if strings.TrimSpace(batch.PromptHash) != "" {
+		promptHash = batch.PromptHash
+	}
+
+	var serviceGitSHA any
+	if strings.TrimSpace(batch.ServiceGitSHA) != "" {
+		serviceGitSHA = batch.ServiceGitSHA
+	}
+
 	var errorMessage any
 	if strings.TrimSpace(batch.ProcessingErrors[i]) != "" {
 		errorMessage = batch.ProcessingErrors[i]
@@ -307,11 +334,13 @@ func (s *Store) upsertAnalysisRun(
 			run_status,
 			trigger_type,
 			prompt_version,
+			prompt_hash,
+			service_git_sha,
 			started_at,
 			completed_at,
 			error_message
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 		ON CONFLICT (id) DO UPDATE
 		SET
 			document_id = EXCLUDED.document_id,
@@ -321,6 +350,8 @@ func (s *Store) upsertAnalysisRun(
 			run_status = EXCLUDED.run_status,
 			trigger_type = EXCLUDED.trigger_type,
 			prompt_version = EXCLUDED.prompt_version,
+			prompt_hash = EXCLUDED.prompt_hash,
+			service_git_sha = EXCLUDED.service_git_sha,
 			started_at = EXCLUDED.started_at,
 			completed_at = EXCLUDED.completed_at,
 			error_message = EXCLUDED.error_message
@@ -330,9 +361,11 @@ func (s *Store) upsertAnalysisRun(
 		sentimentModelID,
 		nerModelID,
 		summaryModelID,
-		statusString(batch.Statuses[i]),
+		StatusString(batch.Statuses[i]),
 		"batch_pipeline",
 		promptVersion,
+		promptHash,
+		serviceGitSHA,
 		startedAt,
 		completedAt,
 		errorMessage,
@@ -522,4 +555,19 @@ func (s *Store) VerifyBatchPersistence(ctx context.Context, batch *Batch) (Batch
 	}
 
 	return stats, nil
+}
+
+func StatusString(s DocumentStatus) string {
+	switch s {
+	case StatusPending:
+		return "pending"
+	case StatusProcessing:
+		return "processing"
+	case StatusDone:
+		return "done"
+	case StatusFailed:
+		return "failed"
+	default:
+		return "unknown"
+	}
 }

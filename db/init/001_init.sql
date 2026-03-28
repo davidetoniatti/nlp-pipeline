@@ -24,11 +24,14 @@ CREATE TABLE IF NOT EXISTS model_version (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     model_name text NOT NULL,
     version text NOT NULL DEFAULT 'unknown',
+    revision text,
+    tokenizer_name text,
     task_type text NOT NULL,
     provider text NOT NULL,
     artifact_uri text,
+    metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
     registered_at timestamptz NOT NULL DEFAULT now(),
-    UNIQUE (model_name, version, task_type, provider)
+    UNIQUE (model_name, version, revision, task_type, provider)
 );
 
 CREATE TABLE IF NOT EXISTS analysis_run (
@@ -40,6 +43,8 @@ CREATE TABLE IF NOT EXISTS analysis_run (
     run_status text NOT NULL,
     trigger_type text NOT NULL,
     prompt_version text,
+    prompt_hash text,
+    service_git_sha text,
     started_at timestamptz,
     completed_at timestamptz,
     created_at timestamptz NOT NULL DEFAULT now(),

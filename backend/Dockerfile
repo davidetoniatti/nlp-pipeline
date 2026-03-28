@@ -8,7 +8,7 @@ RUN go mod download
 
 COPY . .
 
-RUN CGO_ENABLED=0 GOOS=linux go build -o orchestrator .
+RUN CGO_ENABLED=0 GOOS=linux go build -o orchestrator ./cmd/server
 
 # Runtime
 FROM alpine:3.23

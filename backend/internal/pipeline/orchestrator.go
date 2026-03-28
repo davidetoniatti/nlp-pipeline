@@ -1,4 +1,4 @@
-package main
+package pipeline
 
 import (
 	"bytes"
@@ -55,13 +55,23 @@ type InferenceResponse struct {
 
 /*
 ModelVersions carries model metadata returned by the NLP service.
-These are logical model identifiers, not DB foreign keys.
 */
 type ModelVersions struct {
-	SentimentModel string `json:"sentiment_model"`
-	NERModel       string `json:"ner_model"`
-	SummaryModel   string `json:"summary_model"`
-	PromptVersion  string `json:"prompt_version"`
+	Sentiment     ModelMetadata `json:"sentiment"`
+	NER           ModelMetadata `json:"ner"`
+	Summary       ModelMetadata `json:"summary"`
+	PromptVersion string        `json:"prompt_version"`
+	PromptHash    string        `json:"prompt_hash"`
+	ServiceGitSHA string        `json:"service_git_sha"`
+}
+
+/* ModelMetadata carries details for a specific model. */
+type ModelMetadata struct {
+	Name      string `json:"name"`
+	Version   string `json:"version"`
+	Revision  string `json:"revision"`
+	Tokenizer string `json:"tokenizer"`
+	Provider  string `json:"provider"`
 }
 
 /* DocResult is the per-document inference output. */
@@ -557,16 +567,37 @@ func (o *Orchestrator) applyResults(batch *Batch, resp InferenceResponse) {
 		and resolve real foreign keys later.
 	*/
 	batch.ModelVersions = BatchModelVersions{
-		SentimentModelID: resp.ModelVersions.SentimentModel,
-		NERModelID:       resp.ModelVersions.NERModel,
-		SummaryModelID:   resp.ModelVersions.SummaryModel,
+		Sentiment: ModelMetadataDTO{
+			Name:      resp.ModelVersions.Sentiment.Name,
+			Version:   resp.ModelVersions.Sentiment.Version,
+			Revision:  resp.ModelVersions.Sentiment.Revision,
+			Tokenizer: resp.ModelVersions.Sentiment.Tokenizer,
+			Provider:  resp.ModelVersions.Sentiment.Provider,
+		},
+		NER: ModelMetadataDTO{
+			Name:      resp.ModelVersions.NER.Name,
+			Version:   resp.ModelVersions.NER.Version,
+			Revision:  resp.ModelVersions.NER.Revision,
+			Tokenizer: resp.ModelVersions.NER.Tokenizer,
+			Provider:  resp.ModelVersions.NER.Provider,
+		},
+		Summary: ModelMetadataDTO{
+			Name:      resp.ModelVersions.Summary.Name,
+			Version:   resp.ModelVersions.Summary.Version,
+			Revision:  resp.ModelVersions.Summary.Revision,
+			Tokenizer: resp.ModelVersions.Summary.Tokenizer,
+			Provider:  resp.ModelVersions.Summary.Provider,
+		},
 	}
 	batch.PromptVersion = resp.ModelVersions.PromptVersion
+	batch.PromptHash = resp.ModelVersions.PromptHash
+	batch.ServiceGitSHA = resp.ModelVersions.ServiceGitSHA
 
 	o.logger.Info(
 		"applied batch results",
 		"batch_id", batch.ID,
 		"prompt_version", resp.ModelVersions.PromptVersion,
+		"service_git_sha", resp.ModelVersions.ServiceGitSHA,
 	)
 }
 

@@ -12,6 +12,8 @@ import json
 import logging
 import os
 import time
+import hashlib
+import subprocess
 from dataclasses import dataclass, field
 from typing import Literal, Optional
 
@@ -38,6 +40,18 @@ DEFAULT_MAX_TEXT_CHARS = int(os.getenv("MAX_TEXT_CHARS", "4000"))
 DEFAULT_LLM_TIMEOUT_S = float(os.getenv("LLM_TIMEOUT_S", "20"))
 ENABLE_TORCH_COMPILE = os.getenv("ENABLE_TORCH_COMPILE", "false").lower() == "true"
 
+def get_git_sha() -> str:
+    """Get the current git commit hash."""
+    try:
+        # Try to get SHA from git command, or from environment variable if in Docker
+        sha = os.getenv("SERVICE_GIT_SHA")
+        if sha:
+            return sha
+        return subprocess.check_output(["git", "rev-parse", "HEAD"], stderr=subprocess.STDOUT).decode("utf-8").strip()
+    except Exception:
+        return "unknown"
+
+SERVICE_GIT_SHA = get_git_sha()
 
 @dataclass
 class Entity:
@@ -61,15 +75,24 @@ class AnalysisResult:
     summary: Optional[str] = None
     error: Optional[str] = None
 
+@dataclass
+class ModelMetadata:
+    """Specific metadata for a single model."""
+    name: str
+    version: str = "unknown"
+    revision: Optional[str] = None
+    tokenizer: Optional[str] = None
+    provider: str = "huggingface"
 
 @dataclass
 class ModelVersionInfo:
     """Model metadata returned with each batch."""
-
-    sentiment_model: str
-    ner_model: str
-    summary_model: str
+    sentiment: ModelMetadata
+    ner: ModelMetadata
+    summary: ModelMetadata
     prompt_version: str = PROMPT_VERSION
+    prompt_hash: Optional[str] = None
+    service_git_sha: str = SERVICE_GIT_SHA
 
 
 class SummaryPayload(BaseModel):
@@ -114,6 +137,13 @@ class SentimentAnalyzer:
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         model = AutoModelForSequenceClassification.from_pretrained(model_name)
+
+        self.model_metadata = ModelMetadata(
+            name=model_name,
+            revision=getattr(model.config, "_commit_hash", None),
+            tokenizer=self.tokenizer.name_or_path,
+            provider="huggingface"
+        )
 
         if ENABLE_TORCH_COMPILE and hasattr(torch, "compile"):
             try:
@@ -263,6 +293,16 @@ class NERExtractor:
             device=self.device,
             aggregation_strategy="simple",
         )
+        
+        # Get metadata from the pipeline's model
+        model = self._pipe.model
+        tokenizer = self._pipe.tokenizer
+        self.model_metadata = ModelMetadata(
+            name=model_name,
+            revision=getattr(model.config, "_commit_hash", None),
+            tokenizer=tokenizer.name_or_path,
+            provider="huggingface"
+        )
         self.model_name = model_name
         logger.info("NER model ready.")
 
@@ -377,6 +417,15 @@ Restituisci ESCLUSIVAMENTE un oggetto JSON con questa struttura:
         self._model = model
         self._timeout_s = timeout_s
         self._max_text_chars = max_text_chars
+        
+        self.model_metadata = ModelMetadata(
+            name=model,
+            provider="groq"
+        )
+        
+        # Compute prompt hash
+        full_prompt_base = self._SYSTEM_PROMPT + self._USER_PROMPT_TEMPLATE
+        self.prompt_hash = hashlib.sha256(full_prompt_base.encode("utf-8")).hexdigest()
 
         # Bound API concurrency without blocking the event loop.
         self._semaphore = asyncio.Semaphore(max_concurrent)
@@ -561,10 +610,12 @@ class NLPPipeline:
         )
 
         return results, ModelVersionInfo(
-            sentiment_model=self.sentiment.model_name,
-            ner_model=self.ner.model_name,
-            summary_model=self.summarizer._model,
+            sentiment=self.sentiment.model_metadata,
+            ner=self.ner.model_metadata,
+            summary=self.summarizer.model_metadata,
             prompt_version=PROMPT_VERSION,
+            prompt_hash=self.summarizer.prompt_hash,
+            service_git_sha=SERVICE_GIT_SHA,
         )
 
 

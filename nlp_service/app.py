@@ -62,14 +62,22 @@ class DocResultResponse(BaseModel):
     summary: Optional[str] = None
     error: Optional[str] = None
 
+class ModelMetadataResponse(BaseModel):
+    """Specific metadata for a single model."""
+    name: str
+    version: str
+    revision: Optional[str] = None
+    tokenizer: Optional[str] = None
+    provider: str
 
 class ModelVersionsResponse(BaseModel):
     """Model metadata returned with the batch."""
-
-    sentiment_model: str
-    ner_model: str
-    summary_model: str
+    sentiment: ModelMetadataResponse
+    ner: ModelMetadataResponse
+    summary: ModelMetadataResponse
     prompt_version: str
+    prompt_hash: Optional[str] = None
+    service_git_sha: str
 
 
 class InferenceResponse(BaseModel):
@@ -137,10 +145,30 @@ async def analyze(req: InferenceRequest, request: Request):
             for r in results
         ],
         model_versions=ModelVersionsResponse(
-            sentiment_model=versions.sentiment_model,
-            ner_model=versions.ner_model,
-            summary_model=versions.summary_model,
+            sentiment=ModelMetadataResponse(
+                name=versions.sentiment.name,
+                version=versions.sentiment.version,
+                revision=versions.sentiment.revision,
+                tokenizer=versions.sentiment.tokenizer,
+                provider=versions.sentiment.provider,
+            ),
+            ner=ModelMetadataResponse(
+                name=versions.ner.name,
+                version=versions.ner.version,
+                revision=versions.ner.revision,
+                tokenizer=versions.ner.tokenizer,
+                provider=versions.ner.provider,
+            ),
+            summary=ModelMetadataResponse(
+                name=versions.summary.name,
+                version=versions.summary.version,
+                revision=versions.summary.revision,
+                tokenizer=versions.summary.tokenizer,
+                provider=versions.summary.provider,
+            ),
             prompt_version=versions.prompt_version,
+            prompt_hash=versions.prompt_hash,
+            service_git_sha=versions.service_git_sha,
         ),
     )
 

@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"sync"
 	"syscall"
+
+	"backend/internal/pipeline"
 )
 
 /*
@@ -18,7 +20,7 @@ loadMockData reads the local JSON dataset used by the prototype.
 This is bootstrap code only. It keeps the input shape explicit
 instead of hiding it behind generic maps.
 */
-func loadMockData(filename string) ([]Message, error) {
+func loadMockData(filename string) ([]pipeline.Message, error) {
 	file, err := os.Open(filename)
 	if err != nil {
 		return nil, fmt.Errorf("open file failed: %w", err)
@@ -36,9 +38,9 @@ func loadMockData(filename string) ([]Message, error) {
 		return nil, fmt.Errorf("json decode failed: %w", err)
 	}
 
-	messages := make([]Message, len(data))
+	messages := make([]pipeline.Message, len(data))
 	for i, d := range data {
-		messages[i] = Message{
+		messages[i] = pipeline.Message{
 			ID:       d.ID,
 			SourceID: d.SourceID,
 			Lang:     d.Lang,
@@ -60,6 +62,7 @@ func resolveMockDataPath() string {
 	candidates := []string{
 		"test_data.json",
 		filepath.Join("..", "test_data.json"),
+		filepath.Join("..", "..", "test_data.json"),
 	}
 
 	for _, candidate := range candidates {
@@ -71,33 +74,17 @@ func resolveMockDataPath() string {
 	return "test_data.json"
 }
 
-/* statusString converts the internal status enum into the persisted label. */
-func statusString(s DocumentStatus) string {
-	switch s {
-	case StatusPending:
-		return "pending"
-	case StatusProcessing:
-		return "processing"
-	case StatusDone:
-		return "done"
-	case StatusFailed:
-		return "failed"
-	default:
-		return "unknown"
-	}
-}
-
 /*
 printBatch dumps one processed batch to stdout.
 */
-func printBatch(batch *Batch, processedDocs *int) {
+func printBatch(batch *pipeline.Batch, processedDocs *int) {
 	fmt.Printf("\n=== BATCH ANALYSIS: %s ===\n", batch.ID)
-	fmt.Printf("Models: sentiment=%s | ner=%s | summary=%s | prompt=%s\n",
-		batch.ModelVersions.SentimentModelID,
-		batch.ModelVersions.NERModelID,
-		batch.ModelVersions.SummaryModelID,
-		batch.PromptVersion,
-	)
+	fmt.Printf("Service Git SHA: %s\n", batch.ServiceGitSHA)
+	fmt.Printf("Models Metadata:\n")
+	fmt.Printf("  Sentiment: %s (rev: %s, tokenizer: %s)\n", batch.ModelVersions.Sentiment.Name, batch.ModelVersions.Sentiment.Revision, batch.ModelVersions.Sentiment.Tokenizer)
+	fmt.Printf("  NER:       %s (rev: %s, tokenizer: %s)\n", batch.ModelVersions.NER.Name, batch.ModelVersions.NER.Revision, batch.ModelVersions.NER.Tokenizer)
+	fmt.Printf("  Summary:   %s (provider: %s)\n", batch.ModelVersions.Summary.Name, batch.ModelVersions.Summary.Provider)
+	fmt.Printf("Prompt: version=%s, hash=%.12s...\n", batch.PromptVersion, batch.PromptHash)
 
 	for i := 0; i < batch.Size; i++ {
 		*processedDocs++
@@ -107,7 +94,7 @@ func printBatch(batch *Batch, processedDocs *int) {
 		fmt.Printf("  SourceID: %s\n", batch.SourceIDs[i])
 		fmt.Printf("  Language: %s\n", batch.Languages[i])
 		fmt.Printf("  Text: %s\n", batch.Texts[i])
-		fmt.Printf("  Status: %s (%d)\n", statusString(batch.Statuses[i]), batch.Statuses[i])
+		fmt.Printf("  Status: %s (%d)\n", pipeline.StatusString(batch.Statuses[i]), batch.Statuses[i])
 		fmt.Printf("  Sentiment: %s (%.2f)\n", batch.SentimentLabels[i], batch.SentimentScores[i])
 		fmt.Printf("  ProcessingMs: %d\n", batch.ProcessingMs[i])
 
@@ -139,17 +126,17 @@ print the batch, persist it, verify it, and only then ack the source messages.
 func handleProcessedBatch(
 	ctx context.Context,
 	logger *slog.Logger,
-	store *Store,
-	item ProcessedBatch,
-	failureCfg FailureInjectionConfig,
+	store *pipeline.Store,
+	item pipeline.ProcessedBatch,
+	simCfg pipeline.ResilienceSimulatorConfig,
 	processedDocs *int,
 ) {
 	batch := item.Batch
 
-	injected := applyFailureInjection(batch, failureCfg)
+	injected := pipeline.ApplySimulation(batch, simCfg)
 	if injected > 0 {
 		logger.Warn(
-			"failure injection applied",
+			"resilience simulation applied",
 			"batch_id", batch.ID,
 			"injected_docs", injected,
 		)
@@ -178,8 +165,8 @@ func handleProcessedBatch(
 		return
 	}
 
-	expectedDone := countBatchStatus(batch, StatusDone)
-	expectedFailed := countBatchStatus(batch, StatusFailed)
+	expectedDone := batch.CountStatus(pipeline.StatusDone)
+	expectedFailed := batch.CountStatus(pipeline.StatusFailed)
 
 	/*
 		Check that what landed in Postgres matches what the batch says.
@@ -215,6 +202,7 @@ func handleProcessedBatch(
 		"runs_done", stats.RunsDone,
 		"runs_failed", stats.RunsFailed,
 		"results_total", stats.ResultsTotal,
+		"service_git_sha", batch.ServiceGitSHA,
 	)
 
 	if err := item.Ack(); err != nil {
@@ -237,9 +225,9 @@ persistence ordering simple for the prototype.
 func startPersistenceWorker(
 	ctx context.Context,
 	logger *slog.Logger,
-	store *Store,
-	resultsCh <-chan ProcessedBatch,
-	failureCfg FailureInjectionConfig,
+	store *pipeline.Store,
+	resultsCh <-chan pipeline.ProcessedBatch,
+	simCfg pipeline.ResilienceSimulatorConfig,
 	wg *sync.WaitGroup,
 ) {
 	wg.Add(1)
@@ -250,7 +238,7 @@ func startPersistenceWorker(
 		processedDocs := 0
 
 		for item := range resultsCh {
-			handleProcessedBatch(ctx, logger, store, item, failureCfg, &processedDocs)
+			handleProcessedBatch(ctx, logger, store, item, simCfg, &processedDocs)
 		}
 	}()
 }
@@ -261,7 +249,7 @@ func main() {
 	}))
 	slog.SetDefault(logger)
 
-	cfg := DefaultConfig()
+	cfg := pipeline.DefaultConfig()
 	if envURL := os.Getenv("INFERENCE_URL"); envURL != "" {
 		cfg.InferenceURL = envURL
 	}
@@ -275,19 +263,19 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	store, err := NewStore(ctx, databaseURL, logger)
+	store, err := pipeline.NewStore(ctx, databaseURL, logger)
 	if err != nil {
 		logger.Error("Failed to initialize store.", "err", err)
 		os.Exit(1)
 	}
 	defer store.Close()
 
-	failureCfg := LoadFailureInjectionConfig()
-	if failureCfg.Enabled {
+	simCfg := pipeline.LoadResilienceSimulatorConfig()
+	if simCfg.Enabled {
 		logger.Warn(
-			"failure injection enabled",
-			"fail_doc_ids_count", len(failureCfg.DocIDs),
-			"fail_text_contains", failureCfg.TextContains,
+			"resilience simulation enabled",
+			"fail_doc_ids_count", len(simCfg.DocIDs),
+			"fail_text_contains", simCfg.TextContains,
 		)
 	}
 
@@ -309,14 +297,14 @@ func main() {
 	}
 	logger.Info("Mock data loaded.", "total_documents", len(messages))
 
-	queue := NewMockQueue(messages)
-	aiClient := NewHTTPInferenceClient(cfg.InferenceURL)
+	queue := pipeline.NewMockQueue(messages)
+	aiClient := pipeline.NewHTTPInferenceClient(cfg.InferenceURL)
 
-	resultsCh := make(chan ProcessedBatch, 100)
-	orch := NewOrchestrator(cfg, queue, aiClient, resultsCh, logger)
+	resultsCh := make(chan pipeline.ProcessedBatch, 100)
+	orch := pipeline.NewOrchestrator(cfg, queue, aiClient, resultsCh, logger)
 
 	var persistWG sync.WaitGroup
-	startPersistenceWorker(ctx, logger, store, resultsCh, failureCfg, &persistWG)
+	startPersistenceWorker(ctx, logger, store, resultsCh, simCfg, &persistWG)
 
 	logger.Info("Orchestrator running.")
 
