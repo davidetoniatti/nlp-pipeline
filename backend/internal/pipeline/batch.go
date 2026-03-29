@@ -126,20 +126,6 @@ func NewBatch(id string, size int) *Batch {
 }
 
 /*
-SetDocument fills one slot with the minimum required input data.
-This is a compatibility wrapper for callers that do not provide
-language and hash yet.
-*/
-func (b *Batch) SetDocument(i int, id, sourceID, text string) {
-	b.SetDocumentWithLangAndHash(i, id, sourceID, "", text, "")
-}
-
-/* SetDocumentWithHash fills one slot and includes the content hash. */
-func (b *Batch) SetDocumentWithHash(i int, id, sourceID, text, hash string) {
-	b.SetDocumentWithLangAndHash(i, id, sourceID, "", text, hash)
-}
-
-/*
 SetDocumentWithLangAndHash fills one slot with all known input fields.
 This must happen before workers start. It is setup code, not a concurrent path.
 */
@@ -265,18 +251,6 @@ func (b *Batch) IsDone() bool {
 		}
 	}
 	return true
-}
-
-/*
-TextsSlice returns the texts for the selected indices only.
-This is cheaper than building a new batch when retrying a subset.
-*/
-func (b *Batch) TextsSlice(indices []int) []string {
-	out := make([]string, len(indices))
-	for j, i := range indices {
-		out[j] = b.Texts[i]
-	}
-	return out
 }
 
 /*

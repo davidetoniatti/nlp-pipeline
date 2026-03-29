@@ -1,9 +1,5 @@
 # Scalable NLP Analysis Pipeline
 
-Il sistema acquisisce documenti, li invia a un servizio NLP e salva in Postgres le esecuzioni e i risultati finali.
-
-## Scopo del progetto
-
 Per ogni documento in input, il sistema:
 - raccoglie il testo,
 - esegue sentiment analysis multilingua,
@@ -12,8 +8,6 @@ Per ogni documento in input, il sistema:
 - salva in modo persistente run e risultati nel database per garantire tracciabilità e riproducibilità.
 
 ## Architettura
-
-Il sistema è diviso in tre componenti principali:
 
 - **Postgres**: salva documenti, analysis run, risultati, metadati della sorgente e versioni dei modelli (model registry minimale).
 - **Backend Go (Orchestratore)**: consuma messaggi da una coda mock, costruisce batch, chiama il servizio NLP, gestisce i retry con backoff esponenziale e persiste i risultati verificandone l'integrità.
@@ -34,8 +28,6 @@ docker compose up --build
 ```
 
 ### Configurazione
-
-Il sistema è configurabile tramite variabili di ambiente nel file `compose.yml` o in un file `.env`:
 
 - `DATABASE_URL`: URL di connessione a Postgres per il backend Go.
 - `INFERENCE_URL`: Endpoint del servizio NLP (default: `http://ai_service:8080/analyze`).
@@ -62,7 +54,7 @@ Il sistema è configurabile tramite variabili di ambiente nel file `compose.yml`
 
 Il database è progettato per supportare la tracciabilità completa di ogni analisi.
 
-Tabelle principali:
+Tabelle:
 
 - `source_metadata`: Informazioni sull'origine del documento.
 - `document`: Il documento grezzo ricevuto in ingresso.
@@ -70,15 +62,12 @@ Tabelle principali:
 - `analysis_run`: Record di un'esecuzione di analisi, collegato al documento e ai modelli usati.
 - `analysis_result`: L'output strutturato (sentiment, entità, summary) di una run completata.
 
-Lo schema viene inizializzato automaticamente dai file SQL in `db/init`.
 
 ## Design choices
 
 - **Batching**: Ottimizza il throughput e riduce il numero di chiamate di rete.
 - **Retry con backoff e jitter**: Gestisce errori transitori e backpressure (429) in modo resiliente.
-- **Separazione delle responsabilità**: Go gestisce l'orchestrazione e la persistenza; Python isola il runtime ML e le dipendenze pesanti (torch, transformers).
 - **Tracciabilità dei modelli**: Ogni risultato è collegato a una `model_version` specifica, inclusi revisione del modello e hash del prompt.
-- **Resilience Simulator**: Permette di testare la robustezza della pipeline iniettando fallimenti controllati tramite variabili d'ambiente.
 
 ## Struttura del repository
 
