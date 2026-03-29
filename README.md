@@ -1,8 +1,12 @@
 # Scalable NLP Analysis Pipeline
 
+
+> [!IMPORTANT]
+> Lo svolgimento del task 4 si trova all'interno del file `analisi_predittiva.md`.
+
 Per ogni documento in input, il sistema:
-- raccoglie il testo,
-- esegue sentiment analysis multilingua,
+- raccoglie il testo (multilingua: italiano e inglese),
+- esegue sentiment analysis,
 - estrae entità nominate (NER),
 - genera un riassunto (via LLM) solo per i testi con sentiment negativo,
 - salva in modo persistente run e risultati nel database per garantire tracciabilità e riproducibilità.
@@ -13,7 +17,7 @@ Per ogni documento in input, il sistema:
 - **Backend Go (Orchestratore)**: consuma messaggi da una coda mock, costruisce batch, chiama il servizio NLP, gestisce i retry con backoff esponenziale e persiste i risultati verificandone l'integrità.
 - **Servizio NLP (Python/FastAPI)**: espone un'API HTTP che esegue sentiment analysis e NER localmente (Transformers) e summarization condizionale tramite Groq/LLM.
 
-## Avvio rapido
+## Deploy e avvio
 
 ### Requisiti
 
@@ -73,18 +77,18 @@ Tabelle:
 
 ```text
 .
-├── compose.yml           # Orchestrazione dei servizi
-├── test_data.json        # Dataset di test
-├── backend/              # Orchestratore in Go
+├── compose.yml
+├── test_data.json
+├── backend/
 │   ├── cmd/server/       # Entry point dell'applicazione
-│   ├── internal/pipeline/# Core logic: batching, store, orchestrator
+│   ├── internal/pipeline/# batching, store, orchestrator
 │   ├── Dockerfile
-│   └── go.mod            # Dipendenze Go (1.25)
-├── nlp_service/          # Servizio NLP in Python
-│   ├── app.py            # API FastAPI
-│   ├── nlp_inference.py  # Logica di inferenza e modelli
-│   └── requirements.txt  # Dipendenze Python (versioni pinned)
-└── db/init/              # Script di inizializzazione SQL
+│   └── go.mod
+├── nlp_service/          # NLP pipeline
+│   ├── app.py
+│   ├── nlp_inference.py
+│   └── requirements.txt
+└── db/init/
 ```
 
 ## API
@@ -92,3 +96,4 @@ Tabelle:
 Il servizio NLP espone:
 - `POST /analyze`: Accetta batch di documenti e restituisce analisi e metadati dei modelli.
 - `GET /health`: Verifica la readiness del servizio e il caricamento dei modelli.
+
