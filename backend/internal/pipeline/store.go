@@ -433,16 +433,6 @@ type pgxTx interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
-/* providerForTask maps a task to the provider used in this prototype. */
-func providerForTask(taskType string) string {
-	switch taskType {
-	case "summary":
-		return "groq"
-	default:
-		return "huggingface"
-	}
-}
-
 /*
 normalizeUUID turns either a real UUID or a logical id into a stable UUID.
 This is useful in a prototype where some inputs are symbolic ids

@@ -15,7 +15,7 @@ import time
 import hashlib
 import subprocess
 from dataclasses import dataclass, field
-from typing import Literal, Optional
+from typing import Literal, Optional, Any
 
 import torch
 from openai import AsyncOpenAI
@@ -40,6 +40,7 @@ DEFAULT_MAX_TEXT_CHARS = int(os.getenv("MAX_TEXT_CHARS", "4000"))
 DEFAULT_LLM_TIMEOUT_S = float(os.getenv("LLM_TIMEOUT_S", "20"))
 ENABLE_TORCH_COMPILE = os.getenv("ENABLE_TORCH_COMPILE", "false").lower() == "true"
 
+
 def get_git_sha() -> str:
     """Get the current git commit hash."""
     try:
@@ -47,11 +48,19 @@ def get_git_sha() -> str:
         sha = os.getenv("SERVICE_GIT_SHA")
         if sha:
             return sha
-        return subprocess.check_output(["git", "rev-parse", "HEAD"], stderr=subprocess.STDOUT).decode("utf-8").strip()
+        return (
+            subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], stderr=subprocess.STDOUT
+            )
+            .decode("utf-8")
+            .strip()
+        )
     except Exception:
         return "unknown"
 
+
 SERVICE_GIT_SHA = get_git_sha()
+
 
 @dataclass
 class Entity:
@@ -75,18 +84,22 @@ class AnalysisResult:
     summary: Optional[str] = None
     error: Optional[str] = None
 
+
 @dataclass
 class ModelMetadata:
     """Specific metadata for a single model."""
+
     name: str
     version: str = "unknown"
     revision: Optional[str] = None
     tokenizer: Optional[str] = None
     provider: str = "huggingface"
 
+
 @dataclass
 class ModelVersionInfo:
     """Model metadata returned with each batch."""
+
     sentiment: ModelMetadata
     ner: ModelMetadata
     summary: ModelMetadata
@@ -122,45 +135,12 @@ def merge_error(existing: Optional[str], new_error: Optional[str]) -> Optional[s
     return f"{existing}; {new_error}"
 
 
-class SentimentAnalyzer:
-    """Multilingual sentiment analyzer with length-aware batching."""
+class DynamicBatcher:
+    """Helper to group texts into length-aware batches."""
 
-    def __init__(
-        self,
-        model_name: str = DEFAULT_SENTIMENT_MODEL,
-        max_batch_tokens: int = 6000,
-    ):
-        self.device = 0 if torch.cuda.is_available() else -1
+    def __init__(self, tokenizer: Any, max_batch_tokens: int = 6000):
+        self.tokenizer = tokenizer
         self.max_batch_tokens = max_batch_tokens
-        device_name = "CUDA" if self.device == 0 else "CPU"
-        logger.info("Loading sentiment model on %s ...", device_name)
-
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        model = AutoModelForSequenceClassification.from_pretrained(model_name)
-
-        self.model_metadata = ModelMetadata(
-            name=model_name,
-            revision=getattr(model.config, "_commit_hash", None),
-            tokenizer=self.tokenizer.name_or_path,
-            provider="huggingface"
-        )
-
-        if ENABLE_TORCH_COMPILE and hasattr(torch, "compile"):
-            try:
-                model = torch.compile(model)
-                logger.info("torch.compile enabled for sentiment model.")
-            except Exception:
-                logger.exception("torch.compile failed, continuing without it.")
-
-        self._pipe: Pipeline = pipeline(
-            "text-classification",
-            model=model,
-            tokenizer=self.tokenizer,
-            device=self.device,
-            return_all_scores=False,
-        )
-        self.model_name = model_name
-        logger.info("Sentiment model ready.")
 
     def _bucket_sort(self, texts: list[str]) -> list[tuple[int, str, int]]:
         """Sort texts by approximate token length."""
@@ -170,6 +150,8 @@ class SentimentAnalyzer:
         tokenized = self.tokenizer(
             texts,
             add_special_tokens=True,
+            truncation=True,
+            max_length=512,  # Standard transformer limit
         )
         indexed = [
             (i, text, len(input_ids))
@@ -178,12 +160,13 @@ class SentimentAnalyzer:
         indexed.sort(key=lambda x: x[2])
         return indexed
 
-    def _build_dynamic_batches(
+    def build_batches(
         self,
-        sorted_items: list[tuple[int, str, int]],
+        texts: list[str],
         max_batch_size: int,
     ) -> list[list[tuple[int, str, int]]]:
         """Pack texts into batches by size and token budget."""
+        sorted_items = self._bucket_sort(texts)
         batches: list[list[tuple[int, str, int]]] = []
         current: list[tuple[int, str, int]] = []
         current_tokens = 0
@@ -206,6 +189,47 @@ class SentimentAnalyzer:
 
         return batches
 
+
+class SentimentAnalyzer:
+    """Multilingual sentiment analyzer with length-aware batching."""
+
+    def __init__(
+        self,
+        model_name: str = DEFAULT_SENTIMENT_MODEL,
+        max_batch_tokens: int = 6000,
+    ):
+        self.device = 0 if torch.cuda.is_available() else -1
+        device_name = "CUDA" if self.device == 0 else "CPU"
+        logger.info("Loading sentiment model on %s ...", device_name)
+
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        model = AutoModelForSequenceClassification.from_pretrained(model_name)
+
+        self.model_metadata = ModelMetadata(
+            name=model_name,
+            revision=getattr(model.config, "_commit_hash", None),
+            tokenizer=self.tokenizer.name_or_path,
+            provider="huggingface",
+        )
+
+        if ENABLE_TORCH_COMPILE and hasattr(torch, "compile"):
+            try:
+                model = torch.compile(model)
+                logger.info("torch.compile enabled for sentiment model.")
+            except Exception:
+                logger.exception("torch.compile failed, continuing without it.")
+
+        self._pipe: Pipeline = pipeline(
+            "text-classification",
+            model=model,
+            tokenizer=self.tokenizer,
+            device=self.device,
+            return_all_scores=False,
+        )
+        self.batcher = DynamicBatcher(self.tokenizer, max_batch_tokens)
+        self.model_name = model_name
+        logger.info("Sentiment model ready.")
+
     def predict_batch(
         self,
         texts: list[str],
@@ -215,10 +239,7 @@ class SentimentAnalyzer:
         if not texts:
             return [], []
 
-        sorted_items = self._bucket_sort(texts)
-        dynamic_batches = self._build_dynamic_batches(
-            sorted_items, max_batch_size=batch_size
-        )
+        dynamic_batches = self.batcher.build_batches(texts, max_batch_size=batch_size)
 
         predictions: list[Optional[dict]] = [None] * len(texts)
         errors: list[Optional[str]] = [None] * len(texts)
@@ -236,6 +257,7 @@ class SentimentAnalyzer:
                         batch_size=len(chunk_texts),
                     )
                 for idx, pred in zip(chunk_indices, chunk_results):
+                    # For text-classification, pred is already a dict in the batch path
                     predictions[idx] = pred
             except Exception as batch_exc:
                 # If the whole chunk fails, fall back to per-document inference.
@@ -249,7 +271,15 @@ class SentimentAnalyzer:
                                 text,
                                 batch_size=1,
                             )
-                        predictions[idx] = pred
+                        # For a single string, HF returns a list of one dict: [{'label':..., 'score':...}]
+                        if isinstance(pred, list) and len(pred) > 0:
+                            predictions[idx] = pred[0]
+                        elif isinstance(pred, dict):
+                            predictions[idx] = pred
+                        else:
+                            errors[idx] = (
+                                f"unexpected pipeline return type: {type(pred)}"
+                            )
                     except Exception as doc_exc:
                         errors[idx] = str(doc_exc)
 
@@ -274,12 +304,13 @@ class SentimentAnalyzer:
 
 
 class NERExtractor:
-    """Multilingual named entity extractor."""
+    """Multilingual named entity extractor with length-aware batching."""
 
     def __init__(
         self,
         model_name: str = DEFAULT_NER_MODEL,
         score_threshold: float = 0.80,
+        max_batch_tokens: int = 6000,
     ):
         self.device = 0 if torch.cuda.is_available() else -1
         self.score_threshold = score_threshold
@@ -293,7 +324,7 @@ class NERExtractor:
             device=self.device,
             aggregation_strategy="simple",
         )
-        
+
         # Get metadata from the pipeline's model
         model = self._pipe.model
         tokenizer = self._pipe.tokenizer
@@ -301,8 +332,9 @@ class NERExtractor:
             name=model_name,
             revision=getattr(model.config, "_commit_hash", None),
             tokenizer=tokenizer.name_or_path,
-            provider="huggingface"
+            provider="huggingface",
         )
+        self.batcher = DynamicBatcher(tokenizer, max_batch_tokens)
         self.model_name = model_name
         logger.info("NER model ready.")
 
@@ -315,24 +347,28 @@ class NERExtractor:
         results: list[list[Entity]] = [[] for _ in texts]
         errors: list[Optional[str]] = [None] * len(texts)
 
-        for start in range(0, len(texts), batch_size):
-            chunk = texts[start : start + batch_size]
-            chunk_indices = list(range(start, min(start + batch_size, len(texts))))
+        dynamic_batches = self.batcher.build_batches(texts, max_batch_size=batch_size)
+
+        t0 = time.perf_counter()
+
+        for batch in dynamic_batches:
+            chunk_indices = [i for i, _, _ in batch]
+            chunk_texts = [t for _, t, _ in batch]
 
             try:
                 with torch.inference_mode():
-                    raw = self._pipe(
-                        chunk,
-                        batch_size=len(chunk),
+                    chunk_results = self._pipe(
+                        chunk_texts,
+                        batch_size=len(chunk_texts),
                     )
 
-                for idx, doc_entities in zip(chunk_indices, raw):
+                for idx, doc_entities in zip(chunk_indices, chunk_results):
                     results[idx] = self._convert_entities(doc_entities)
             except Exception as batch_exc:
                 logger.exception(
                     "NER chunk failed, retrying per document: %s", batch_exc
                 )
-                for idx, text in zip(chunk_indices, chunk):
+                for idx, text, _ in batch:
                     try:
                         with torch.inference_mode():
                             doc_raw = self._pipe(
@@ -344,6 +380,14 @@ class NERExtractor:
                         errors[idx] = str(doc_exc)
                         results[idx] = []
 
+        elapsed = time.perf_counter() - t0
+        throughput = len(texts) / elapsed if elapsed > 0 else 0.0
+        logger.info(
+            "NER inference: %d texts in %.2fs (%.1f text/s)",
+            len(texts),
+            elapsed,
+            throughput,
+        )
         return results, errors
 
     def _convert_entities(self, raw_entities: list[dict]) -> list[Entity]:
@@ -407,22 +451,23 @@ Restituisci ESCLUSIVAMENTE un oggetto JSON con questa struttura:
         max_text_chars: int = DEFAULT_MAX_TEXT_CHARS,
     ):
         resolved_key = api_key or os.environ.get("GROQ_API_KEY")
+        self._enabled = True
         if not resolved_key:
-            raise ValueError("GROQ_API_KEY not set")
+            logger.warning("GROQ_API_KEY not set. Summarization will be disabled.")
+            self._enabled = False
+            self._client = None
+        else:
+            self._client = AsyncOpenAI(
+                api_key=resolved_key,
+                base_url=GROQ_BASE_URL,
+            )
 
-        self._client = AsyncOpenAI(
-            api_key=resolved_key,
-            base_url=GROQ_BASE_URL,
-        )
         self._model = model
         self._timeout_s = timeout_s
         self._max_text_chars = max_text_chars
-        
-        self.model_metadata = ModelMetadata(
-            name=model,
-            provider="groq"
-        )
-        
+
+        self.model_metadata = ModelMetadata(name=model, provider="groq")
+
         # Compute prompt hash
         full_prompt_base = self._SYSTEM_PROMPT + self._USER_PROMPT_TEMPLATE
         self.prompt_hash = hashlib.sha256(full_prompt_base.encode("utf-8")).hexdigest()
@@ -439,6 +484,9 @@ Restituisci ESCLUSIVAMENTE un oggetto JSON con questa struttura:
         """Summarize one text only if its sentiment is negative."""
         if sentiment_label != "Negative":
             return None, None
+
+        if not self._enabled:
+            return None, "summarizer_disabled"
 
         safe_text = normalize_text(text, max_chars=self._max_text_chars)
         entity_str = (

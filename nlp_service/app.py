@@ -62,16 +62,20 @@ class DocResultResponse(BaseModel):
     summary: Optional[str] = None
     error: Optional[str] = None
 
+
 class ModelMetadataResponse(BaseModel):
     """Specific metadata for a single model."""
+
     name: str
     version: str
     revision: Optional[str] = None
     tokenizer: Optional[str] = None
     provider: str
 
+
 class ModelVersionsResponse(BaseModel):
     """Model metadata returned with the batch."""
+
     sentiment: ModelMetadataResponse
     ner: ModelMetadataResponse
     summary: ModelMetadataResponse
