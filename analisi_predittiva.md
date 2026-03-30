@@ -1,8 +1,7 @@
 # Task 4 — Analisi predittiva: previsione picchi di feedback negativi
 
 Il sistema già raccoglie, per ogni documento processato, sentiment label, score, entità, timestamp e sorgente. Con 6 mesi di storico questi dati diventano una serie temporale su cui è ragionevole costruire un modello che stimi la probabilità di un picco di negativi nelle prossime 24 ore.
-L'output atteso è un segnale binario o una probabilità: *"nelle prossime 24 ore il volume di feedback negativi supererà una soglia critica?"* — abbastanza azionabile da triggare una notifica al team di supporto senza richiedere loro di monitorare una dashboard.
-
+L'output atteso è un segnale binario o una probabilità: *"nelle prossime 24 ore il volume di feedback negativi supererà una soglia critica?"*
 ## Feature engineering
 
 Parto dai dati già presenti in `analysis_result` e `analysis_run`, aggregati su finestre temporali scorrevoli.
